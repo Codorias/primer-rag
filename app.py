@@ -85,6 +85,16 @@ st.caption("Powered by Claude + RAG · Las respuestas siempre citan la fuente")
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.write(msg["content"])
+        if "confidence" in msg:
+            conf = msg["confidence"]
+            if conf >= 75:
+                label, color = "Alta", "🟢"
+            elif conf >= 50:
+                label, color = "Media", "🟡"
+            else:
+                label, color = "Baja", "🔴"
+            st.caption(f"{color} Confianza de la respuesta: **{label}** ({conf}%)")
+            st.progress(int(conf) / 100)
         if msg.get("sources"):
             with st.expander(f"Fuentes usadas ({len(msg['sources'])})"):
                 for s in msg["sources"]:
@@ -117,6 +127,17 @@ if prompt := st.chat_input("Hazle una pregunta a tus documentos..."):
 
         st.write(result["answer"])
 
+        conf = result.get("confidence", 0.0)
+        if conf >= 75:
+            label, color = "Alta", "🟢"
+        elif conf >= 50:
+            label, color = "Media", "🟡"
+        else:
+            label, color = "Baja", "🔴"
+
+        st.caption(f"{color} Confianza de la respuesta: **{label}** ({conf}%)")
+        st.progress(int(conf) / 100)
+
         if result["sources"]:
             with st.expander(f"Fuentes usadas ({len(result['sources'])})"):
                 for s in result["sources"]:
@@ -127,7 +148,8 @@ if prompt := st.chat_input("Hazle una pregunta a tus documentos..."):
                     st.caption(s["preview"])
 
     st.session_state.messages.append({
-        "role":    "assistant",
-        "content": result["answer"],
-        "sources": result["sources"],
+        "role":       "assistant",
+        "content":    result["answer"],
+        "sources":    result["sources"],
+        "confidence": result.get("confidence", 0.0),
     })

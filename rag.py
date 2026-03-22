@@ -178,8 +178,14 @@ def ask(query: str, chat_history: list | None = None,
         answer = f"Error al contactar la API de Claude: {e}"
         sources = []
 
+    confidence = (
+        round(sum(s["relevance"] for s in sources) / len(sources), 1)
+        if sources else 0.0
+    )
+
     return {
         "answer":       answer,
         "sources":      sources,
         "context_used": context_docs,
+        "confidence":   confidence,
     }
