@@ -11,13 +11,27 @@ from langchain_huggingface import HuggingFaceEmbeddings
 load_dotenv()
 
 # ── Configuración global ─────────────────────────────────────────────────────
-CHROMA_PATH = "chroma_db"
-EMBED_MODEL  = "all-MiniLM-L6-v2"  # modelo local, sin costo extra
-CHUNK_SIZE   = 800
-CHUNK_OVERLAP= 150
+CHROMA_PATH   = "chroma_db"
+EMBED_MODEL   = "all-MiniLM-L6-v2"
+CHUNK_SIZE    = 800
+CHUNK_OVERLAP = 150
 
-client = anthropic.Anthropic()
+client     = anthropic.Anthropic()
 embeddings = HuggingFaceEmbeddings(model_name=EMBED_MODEL)
+
+# Caché del vectorstore — se reutiliza entre llamadas en la misma sesión
+_store: Chroma | None = None
+
+
+def _get_store(collection_name: str = "documents") -> Chroma:
+    global _store
+    if _store is None:
+        _store = Chroma(
+            collection_name=collection_name,
+            embedding_function=embeddings,
+            persist_directory=CHROMA_PATH,
+        )
+    return _store
 
 
 # ── 1. INGESTA ────────────────────────────────────────────────────────────────
@@ -34,11 +48,10 @@ def load_and_split_pdf(pdf_path: str) -> list:
     )
     chunks = splitter.split_documents(pages)
 
-    # Agrega metadata útil a cada chunk
     for i, chunk in enumerate(chunks):
-        chunk.metadata["chunk_id"]  = i
-        chunk.metadata["source"]    = Path(pdf_path).name
-        chunk.metadata["char_count"]= len(chunk.page_content)
+        chunk.metadata["chunk_id"]   = i
+        chunk.metadata["source"]     = Path(pdf_path).name
+        chunk.metadata["char_count"] = len(chunk.page_content)
 
     return chunks
 
@@ -46,14 +59,7 @@ def load_and_split_pdf(pdf_path: str) -> list:
 def ingest_document(pdf_path: str, collection_name: str = "documents") -> dict:
     """Pipeline completo: carga → split → embed → guarda en ChromaDB."""
     chunks = load_and_split_pdf(pdf_path)
-
-    # Crea o añade a la colección existente
-    vectorstore = Chroma(
-        collection_name=collection_name,
-        embedding_function=embeddings,
-        persist_directory=CHROMA_PATH,
-    )
-    vectorstore.add_documents(chunks)
+    _get_store(collection_name).add_documents(chunks)
 
     return {
         "filename": Path(pdf_path).name,
@@ -65,29 +71,20 @@ def ingest_document(pdf_path: str, collection_name: str = "documents") -> dict:
 def get_ingested_docs(collection_name: str = "documents") -> list[str]:
     """Devuelve la lista de documentos ya procesados."""
     try:
-        vectorstore = Chroma(
-            collection_name=collection_name,
-            embedding_function=embeddings,
-            persist_directory=CHROMA_PATH,
-        )
-        docs = vectorstore.get()
-        sources = list(set(
+        docs = _get_store(collection_name).get()
+        return list(set(
             m.get("source", "Desconocido")
             for m in docs.get("metadatas", [])
         ))
-        return sources
     except Exception:
         return []
 
 
-def delete_collection(collection_name: str = "documents"):
-    """Borra todos los documentos de la colección."""
-    vectorstore = Chroma(
-        collection_name=collection_name,
-        embedding_function=embeddings,
-        persist_directory=CHROMA_PATH,
-    )
-    vectorstore.delete_collection()
+def delete_collection(collection_name: str = "documents") -> None:
+    """Borra todos los documentos de la colección e invalida el caché."""
+    global _store
+    _get_store(collection_name).delete_collection()
+    _store = None
 
 
 # ── 2. RETRIEVAL ──────────────────────────────────────────────────────────────
@@ -95,14 +92,8 @@ def delete_collection(collection_name: str = "documents"):
 def retrieve_context(query: str, k: int = 4,
                      collection_name: str = "documents") -> list:
     """Busca los k chunks más relevantes para la pregunta."""
-    vectorstore = Chroma(
-        collection_name=collection_name,
-        embedding_function=embeddings,
-        persist_directory=CHROMA_PATH,
-    )
     # similarity_search_with_score devuelve (doc, score) — score más bajo = más similar
-    results = vectorstore.similarity_search_with_score(query, k=k)
-    return results
+    return _get_store(collection_name).similarity_search_with_score(query, k=k)
 
 
 # ── 3. GENERACIÓN ─────────────────────────────────────────────────────────────
@@ -122,13 +113,12 @@ lo encontraste en los documentos.
 5. Si la pregunta no puede responderse con el contexto, sugiere qué documento \
 podría tener esa información."""
 
-    # Formatea el contexto con metadata visible
     context_parts = []
     sources_used  = []
 
     for doc, score in context_docs:
-        source = doc.metadata.get("source", "Desconocido")
-        page   = doc.metadata.get("page", "?")
+        source    = doc.metadata.get("source", "Desconocido")
+        page      = doc.metadata.get("page", "?")
         relevance = round((1 - score) * 100, 1)
 
         context_parts.append(
@@ -155,40 +145,41 @@ Pregunta: {query}"""
     return system_prompt, user_message, sources_used
 
 
-def ask(query: str, chat_history: list = None,
+def ask(query: str, chat_history: list | None = None,
         collection_name: str = "documents") -> dict:
     """Función principal: pregunta → contexto → respuesta con fuentes."""
 
-    # 1. Recuperar contexto relevante
     context_docs = retrieve_context(query, k=4, collection_name=collection_name)
 
     if not context_docs:
         return {
-            "answer":  "No encontré documentos procesados. Sube un PDF primero.",
-            "sources": [],
+            "answer":       "No encontré documentos procesados. Sube un PDF primero.",
+            "sources":      [],
             "context_used": [],
         }
 
-    # 2. Construir mensajes
     system_prompt, user_message, sources = build_prompt(query, context_docs)
 
-    # 3. Construir historial de conversación para memoria
     messages = []
     if chat_history:
         for msg in chat_history[-6:]:  # últimos 3 intercambios
             messages.append({"role": msg["role"], "content": msg["content"]})
     messages.append({"role": "user", "content": user_message})
 
-    # 4. Llamar a Claude
-    response = client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=1500,
-        system=system_prompt,
-        messages=messages,
-    )
+    try:
+        response = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=1500,
+            system=system_prompt,
+            messages=messages,
+        )
+        answer = response.content[0].text
+    except anthropic.APIError as e:
+        answer = f"Error al contactar la API de Claude: {e}"
+        sources = []
 
     return {
-        "answer":       response.content[0].text,
+        "answer":       answer,
         "sources":      sources,
         "context_used": context_docs,
     }
