@@ -46,7 +46,7 @@ with st.sidebar:
                         tmp.write(file.read())
                         tmp_path = tmp.name
 
-                    result = ingest_document(tmp_path)
+                    result = ingest_document(tmp_path, filename=file.name)
                     st.success(
                         f"✓ {result['filename']} — "
                         f"{result['pages']} págs, {result['chunks']} fragmentos"

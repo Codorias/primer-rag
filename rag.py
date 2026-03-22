@@ -36,7 +36,7 @@ def _get_store(collection_name: str = "documents") -> Chroma:
 
 # ── 1. INGESTA ────────────────────────────────────────────────────────────────
 
-def load_and_split_pdf(pdf_path: str) -> list:
+def load_and_split_pdf(pdf_path: str, display_name: str | None = None) -> list:
     """Carga un PDF y lo divide en chunks con overlap."""
     loader = PyPDFLoader(pdf_path)
     pages  = loader.load()
@@ -48,21 +48,24 @@ def load_and_split_pdf(pdf_path: str) -> list:
     )
     chunks = splitter.split_documents(pages)
 
+    source = display_name or Path(pdf_path).name
     for i, chunk in enumerate(chunks):
         chunk.metadata["chunk_id"]   = i
-        chunk.metadata["source"]     = Path(pdf_path).name
+        chunk.metadata["source"]     = source
         chunk.metadata["char_count"] = len(chunk.page_content)
 
     return chunks
 
 
-def ingest_document(pdf_path: str, collection_name: str = "documents") -> dict:
+def ingest_document(pdf_path: str, filename: str | None = None,
+                    collection_name: str = "documents") -> dict:
     """Pipeline completo: carga → split → embed → guarda en ChromaDB."""
-    chunks = load_and_split_pdf(pdf_path)
+    display_name = filename or Path(pdf_path).name
+    chunks = load_and_split_pdf(pdf_path, display_name)
     _get_store(collection_name).add_documents(chunks)
 
     return {
-        "filename": Path(pdf_path).name,
+        "filename": display_name,
         "pages":    len(set(c.metadata.get("page", 0) for c in chunks)),
         "chunks":   len(chunks),
     }
