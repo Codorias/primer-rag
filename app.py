@@ -94,7 +94,7 @@ for msg in st.session_state.messages:
             else:
                 label, color = "Baja", "🔴"
             st.caption(f"{color} Confianza de la respuesta: **{label}** ({conf}%)")
-            st.progress(int(conf) / 100)
+            st.progress(max(0, min(100, int(conf))) / 100)
         if msg.get("sources"):
             with st.expander(f"Fuentes usadas ({len(msg['sources'])})"):
                 for s in msg["sources"]:

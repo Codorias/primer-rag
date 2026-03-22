@@ -122,7 +122,7 @@ podría tener esa información."""
     for doc, score in context_docs:
         source    = doc.metadata.get("source", "Desconocido")
         page      = doc.metadata.get("page", "?")
-        relevance = round((1 - score) * 100, 1)
+        relevance = round(max(0.0, (1 - score) * 100), 1)
 
         context_parts.append(
             f"[Fragmento de: {source}, página {page}, "
