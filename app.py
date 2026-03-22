@@ -1,7 +1,12 @@
 import streamlit as st
 import tempfile
 import os
+
 from rag import ingest_document, get_ingested_docs, ask, delete_collection, embeddings, client
+from db import (
+    init_db, create_conversation, add_message,
+    get_conversations, get_messages, delete_conversation, clear_all_conversations,
+)
 
 # ── Config ───────────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -10,23 +15,72 @@ st.set_page_config(
     layout="wide",
 )
 
+init_db()
 
-# ── Objetos pesados cacheados — se instancian una sola vez por sesión ─────────
+
 @st.cache_resource(show_spinner="Cargando modelo de embeddings...")
 def _load_resources():
-    """Fuerza la carga del modelo de embeddings al iniciar."""
     return embeddings, client
 
 
 _load_resources()
 
 # ── Estado inicial ────────────────────────────────────────────────────────────
+if "current_conv_id" not in st.session_state:
+    st.session_state.current_conv_id = None
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
+
+def _load_conversation(conv_id: int) -> None:
+    st.session_state.current_conv_id = conv_id
+    st.session_state.messages = get_messages(conv_id)
+
+
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
-    st.title("📄 Documentos")
+
+    # ── Historial ─────────────────────────────────────────────────────────────
+    st.subheader("💬 Conversaciones")
+
+    if st.button("＋ Nueva conversación", use_container_width=True):
+        st.session_state.current_conv_id = None
+        st.session_state.messages = []
+        st.rerun()
+
+    conversations = get_conversations()
+
+    if conversations:
+        for conv in conversations[:30]:
+            is_active = st.session_state.current_conv_id == conv["id"]
+            col_title, col_del = st.columns([5, 1])
+
+            with col_title:
+                title = f"**{conv['title']}**" if is_active else conv["title"]
+                if st.button(title, key=f"conv_{conv['id']}", use_container_width=True):
+                    _load_conversation(conv["id"])
+                    st.rerun()
+
+            with col_del:
+                if st.button("🗑", key=f"del_{conv['id']}"):
+                    delete_conversation(conv["id"])
+                    if st.session_state.current_conv_id == conv["id"]:
+                        st.session_state.current_conv_id = None
+                        st.session_state.messages = []
+                    st.rerun()
+
+        st.divider()
+        if st.button("🗑 Borrar todo el historial", use_container_width=True):
+            clear_all_conversations()
+            st.session_state.current_conv_id = None
+            st.session_state.messages = []
+            st.rerun()
+    else:
+        st.caption("Sin conversaciones aún")
+
+    # ── Documentos ────────────────────────────────────────────────────────────
+    st.divider()
+    st.subheader("📄 Documentos")
 
     uploaded = st.file_uploader(
         "Sube uno o varios PDFs",
@@ -64,10 +118,8 @@ with st.sidebar:
     if docs:
         for doc in docs:
             st.markdown(f"- {doc}")
-
         if st.button("Limpiar todos los documentos", type="secondary"):
             delete_collection()
-            st.session_state.messages = []
             st.rerun()
     else:
         st.caption("Ninguno todavía — sube un PDF arriba")
@@ -82,10 +134,11 @@ with st.sidebar:
 st.title("💬 Chat con tus documentos")
 st.caption("Powered by Claude + RAG · Las respuestas siempre citan la fuente")
 
+# Render historial de la conversación activa
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.write(msg["content"])
-        if "confidence" in msg:
+        if msg.get("confidence") is not None and msg["role"] == "assistant":
             conf = msg["confidence"]
             if conf >= 75:
                 label, color = "Alta", "🟢"
@@ -104,12 +157,20 @@ for msg in st.session_state.messages:
                     )
                     st.caption(s["preview"])
 
+# Input del usuario
 if prompt := st.chat_input("Hazle una pregunta a tus documentos..."):
 
     if not get_ingested_docs():
         st.warning("Sube al menos un PDF antes de hacer preguntas.")
         st.stop()
 
+    # Crear conversación si es la primera pregunta
+    if st.session_state.current_conv_id is None:
+        st.session_state.current_conv_id = create_conversation(prompt)
+
+    conv_id = st.session_state.current_conv_id
+
+    add_message(conv_id, "user", prompt)
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.write(prompt)
@@ -134,9 +195,8 @@ if prompt := st.chat_input("Hazle una pregunta a tus documentos..."):
             label, color = "Media", "🟡"
         else:
             label, color = "Baja", "🔴"
-
         st.caption(f"{color} Confianza de la respuesta: **{label}** ({conf}%)")
-        st.progress(int(conf) / 100)
+        st.progress(max(0, min(100, int(conf))) / 100)
 
         if result["sources"]:
             with st.expander(f"Fuentes usadas ({len(result['sources'])})"):
@@ -147,9 +207,11 @@ if prompt := st.chat_input("Hazle una pregunta a tus documentos..."):
                     )
                     st.caption(s["preview"])
 
+    add_message(conv_id, "assistant", result["answer"],
+                sources=result["sources"], confidence=conf)
     st.session_state.messages.append({
         "role":       "assistant",
         "content":    result["answer"],
         "sources":    result["sources"],
-        "confidence": result.get("confidence", 0.0),
+        "confidence": conf,
     })
